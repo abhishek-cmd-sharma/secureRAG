@@ -63,7 +63,7 @@ export function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) 
       path: '/audit-logs',
       icon: FileSpreadsheet,
       roles: ['Admin'],
-      badge: 'SOC2'
+      badge: 'Audit'
     },
     {
       title: 'Settings',

@@ -25,6 +25,8 @@ export async function getOrganizations(req, res, next) {
         ]);
         return {
           ...org.toObject(),
+          id: String(org._id),
+          status: org.isActive !== false ? 'Active' : 'Inactive',
           activeUsers,
           documentsCount
         };

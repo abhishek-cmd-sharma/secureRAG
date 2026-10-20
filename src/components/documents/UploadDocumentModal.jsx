@@ -33,7 +33,7 @@ export function UploadDocumentModal({ isOpen, onClose }) {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!docName.trim()) {
       setError('Please provide a document title.');
@@ -41,46 +41,42 @@ export function UploadDocumentModal({ isOpen, onClose }) {
     }
 
     setIsUploading(true);
-    setUploadProgress(15);
+    setUploadProgress(20);
+    setError('');
 
-    // Simulate chunking and vector embedding pipeline
-    const interval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 90) {
-          clearInterval(interval);
-          setTimeout(() => {
-            setIsUploading(false);
-            setUploadProgress(100);
+    try {
+      const ext = docName.split('.').pop().toUpperCase();
+      const type = ['PDF', 'DOCX', 'TXT', 'MD'].includes(ext) ? ext : 'PDF';
 
-            // Compute file extension type
-            const ext = docName.split('.').pop().toUpperCase();
-            const type = ['PDF', 'DOCX', 'TXT', 'MD'].includes(ext) ? ext : 'PDF';
-
-            addDocument({
-              name: docName.trim(),
-              file: file,
-              type,
-              size: file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : '2.1 MB',
-              orgId: currentUser.orgId,
-              orgName: currentUser.orgName,
-              owner: currentUser.name,
-              accessLevel,
-              summary: summary.trim() || 'Enterprise operational documentation indexed into tenant vector collection.',
-              excerpt: `Ingested document content for ${docName}. Automated chunking split the document into vector segments. Encrypted using tenant KMS master key.`
-            });
-
-            // Reset and close
-            setFile(null);
-            setDocName('');
-            setSummary('');
-            setUploadProgress(0);
-            onClose();
-          }, 400);
-          return 95;
-        }
-        return prev + 25;
+      setUploadProgress(50);
+      const success = await addDocument({
+        name: docName.trim(),
+        file: file,
+        type,
+        size: file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : '2.1 MB',
+        orgId: currentUser.orgId,
+        orgName: currentUser.orgName,
+        owner: currentUser.name,
+        accessLevel,
+        summary: summary.trim() || 'Enterprise operational documentation indexed into tenant vector collection.',
+        excerpt: `Ingested document content for ${docName}. Automated chunking split the document into vector segments. Encrypted using tenant KMS master key.`
       });
-    }, 200);
+
+      if (success !== false) {
+        setUploadProgress(100);
+        setFile(null);
+        setDocName('');
+        setSummary('');
+        setUploadProgress(0);
+        onClose();
+      } else {
+        setError('Upload failed. Please check server connection.');
+      }
+    } catch (err) {
+      setError(err.message || 'Document upload failed');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   return (

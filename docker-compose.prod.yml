@@ -1,0 +1,27 @@
+# ==============================================================================
+# SecureRAG — Production Lockdown Compose Override
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Locks down internal ports (Qdrant and backend are only accessible via Nginx reverse proxy)
+# ==============================================================================
+
+services:
+  qdrant:
+    # Remove public host port mappings in production
+    ports: []
+    expose:
+      - "6333"
+      - "6334"
+
+  backend:
+    # Remove public host port mappings in production
+    ports: []
+    expose:
+      - "5000"
+    environment:
+      - NODE_ENV=production
+      - ALLOW_MEMORY_DB=false
+
+  frontend:
+    ports:
+      - "80:80"
+    restart: always

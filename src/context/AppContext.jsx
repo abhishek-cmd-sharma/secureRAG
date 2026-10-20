@@ -1,16 +1,32 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import {
-  DEMO_ROLES,
-  INITIAL_ORGANIZATIONS,
-  INITIAL_USERS,
-  INITIAL_DOCUMENTS,
-  INITIAL_AUDIT_LOGS,
-  INITIAL_CHAT_SESSIONS,
-  MOCK_RESPONSES,
-} from '../data/mockData';
+import { DEMO_ROLES } from '../data/mockData';
 import { api } from '../utils/api';
 
 const AppContext = createContext(null);
+
+// Purge legacy prototype mock data from local storage
+function getCleanCollection(key, mockPrefixes = []) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const hasMock = parsed.some(item => {
+        const id = String(item?.id || item?._id || '');
+        return mockPrefixes.some(prefix => id.startsWith(prefix));
+      });
+      if (hasMock) {
+        localStorage.removeItem(key);
+        return [];
+      }
+      return parsed;
+    }
+    return [];
+  } catch {
+    localStorage.removeItem(key);
+    return [];
+  }
+}
 
 export function AppProvider({ children }) {
   // 1. Authentication & Role state
@@ -27,36 +43,32 @@ export function AppProvider({ children }) {
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [isLoadingData, setIsLoadingData] = useState(false);
 
-  // 2. Data collections (populated from MongoDB via Backend API)
+  // 2. Data collections (strictly populated from MongoDB Atlas & Qdrant via Backend API)
   const [organizations, setOrganizations] = useState(() => {
-    const saved = localStorage.getItem('securerag_orgs');
-    return saved ? JSON.parse(saved) : INITIAL_ORGANIZATIONS;
+    return getCleanCollection('securerag_orgs', ['org-']);
   });
 
   const [users, setUsers] = useState(() => {
-    const saved = localStorage.getItem('securerag_users');
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
+    return getCleanCollection('securerag_users', ['usr-']);
   });
 
   const [documents, setDocuments] = useState(() => {
-    const saved = localStorage.getItem('securerag_docs');
-    return saved ? JSON.parse(saved) : INITIAL_DOCUMENTS;
+    return getCleanCollection('securerag_docs', ['doc-']);
   });
 
   const [auditLogs, setAuditLogs] = useState(() => {
-    const saved = localStorage.getItem('securerag_audit');
-    return saved ? JSON.parse(saved) : INITIAL_AUDIT_LOGS;
+    return getCleanCollection('securerag_audit', ['log-']);
   });
 
   const [dashboardKpis, setDashboardKpis] = useState(null);
 
   const [chatSessions, setChatSessions] = useState(() => {
-    const saved = localStorage.getItem('securerag_chats');
-    return saved ? JSON.parse(saved) : INITIAL_CHAT_SESSIONS;
+    return getCleanCollection('securerag_chats', ['chat-1', 'chat-2']);
   });
 
   const [activeSessionId, setActiveSessionId] = useState(() => {
-    return chatSessions.length > 0 ? chatSessions[0].id : null;
+    const initialChats = getCleanCollection('securerag_chats', ['chat-1', 'chat-2']);
+    return initialChats.length > 0 ? initialChats[0].id : null;
   });
 
   const [isAiTyping, setIsAiTyping] = useState(false);
@@ -172,7 +184,12 @@ export function AppProvider({ children }) {
       try {
         const docsRes = await api.getDocuments();
         if (docsRes?.success && Array.isArray(docsRes.data)) {
-          setDocuments(docsRes.data);
+          const formattedDocs = docsRes.data.map(d => ({
+            ...d,
+            id: d.id || String(d._id),
+            status: d.status ? (d.status.charAt(0).toUpperCase() + d.status.slice(1).toLowerCase()) : 'Indexed'
+          }));
+          setDocuments(formattedDocs);
         }
       } catch (e) {}
 
@@ -201,7 +218,12 @@ export function AppProvider({ children }) {
       try {
         const orgsRes = await api.getOrganizations();
         if (orgsRes?.success && Array.isArray(orgsRes.data)) {
-          setOrganizations(orgsRes.data);
+          const formattedOrgs = orgsRes.data.map(o => ({
+            ...o,
+            id: o.id || String(o._id),
+            status: o.status || (o.isActive !== false ? 'Active' : 'Inactive')
+          }));
+          setOrganizations(formattedOrgs);
         }
       } catch (e) {}
 
@@ -210,6 +232,49 @@ export function AppProvider({ children }) {
         const auditRes = await api.getAuditLogs();
         if (auditRes?.success && Array.isArray(auditRes.data)) {
           setAuditLogs(auditRes.data);
+        }
+      } catch (e) {}
+
+      // 6. Real Chat Conversations from MongoDB Atlas
+      try {
+        const convRes = await api.getConversations();
+        if (convRes?.success && Array.isArray(convRes.data) && convRes.data.length > 0) {
+          const sessionsWithHistory = await Promise.all(
+            convRes.data.map(async (c) => {
+              try {
+                const full = await api.getConversationById(c.id);
+                const msgs = full?.data?.messages || [];
+                return {
+                  id: String(c.id),
+                  title: c.title,
+                  createdAt: new Date(c.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                  documentScope: 'all',
+                  messages: msgs.map(m => ({
+                    id: String(m._id || m.id || `msg-${Date.now()}`),
+                    sender: m.sender === 'assistant' ? 'ai' : m.sender,
+                    text: m.text || m.content || '',
+                    timestamp: new Date(m.timestamp || m.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    citations: m.citations || [],
+                    searchedDocuments: m.searchedDocuments || [],
+                    rewrittenQuery: m.rewrittenQuery,
+                    isDenied: !!m.isDenied,
+                    model: m.model,
+                    feedback: m.feedback || null
+                  }))
+                };
+              } catch {
+                return {
+                  id: String(c.id),
+                  title: c.title,
+                  createdAt: new Date(c.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                  documentScope: 'all',
+                  messages: []
+                };
+              }
+            })
+          );
+          setChatSessions(sessionsWithHistory);
+          setActiveSessionId(prev => (prev && sessionsWithHistory.some(s => s.id === prev)) ? prev : sessionsWithHistory[0].id);
         }
       } catch (e) {}
 
@@ -226,7 +291,7 @@ export function AppProvider({ children }) {
     async function initSession() {
       try {
         // Test backend connectivity
-        const health = await fetch('http://localhost:5000/api/health').then(r => r.json()).catch(() => null);
+        const health = await api.getHealth().catch(() => null);
         if (health && health.status === 'healthy') {
           setIsBackendConnected(true);
 
@@ -379,7 +444,9 @@ export function AppProvider({ children }) {
           setDocuments(prev => [uploadRes.data, ...prev]);
           addToast(`"${newDoc.name}" uploaded, parsed, and indexed in Qdrant!`, 'success');
           refreshBackendData();
-          return;
+          return true;
+        } else {
+          throw new Error(uploadRes?.message || 'Server failed to index PDF');
         }
       }
 
@@ -394,25 +461,15 @@ export function AppProvider({ children }) {
       });
       if (res?.success && res.data) {
         setDocuments(prev => [res.data, ...prev]);
-        addToast(`"${newDoc.name}" uploaded and indexed successfully in MongoDB`, 'success');
+        addToast(`"${newDoc.name}" created and indexed successfully in MongoDB`, 'success');
         refreshBackendData();
-        return;
+        return true;
       }
     } catch (err) {
-      console.warn('Backend document save failed, fallback to local state:', err.message);
+      console.error('[Document Upload Error]:', err.message);
+      addToast(`Upload failed: ${err.message}`, 'error');
+      return false;
     }
-
-    // Local fallback
-    const docWithId = {
-      ...newDoc,
-      id: `doc-${Date.now()}`,
-      uploadDate: new Date().toISOString().split('T')[0],
-      status: 'Indexed',
-      chunksCount: Math.floor(Math.random() * 60) + 20,
-      retrievalScore: 0.95
-    };
-    setDocuments(prev => [docWithId, ...prev]);
-    addToast(`"${docWithId.name}" saved to knowledge base`, 'success');
   };
 
   const deleteDocument = async (docId) => {
@@ -440,21 +497,12 @@ export function AppProvider({ children }) {
       if (res?.success) {
         addToast(`User ${userData.name} provisioned in MongoDB`, 'success');
         refreshBackendData();
-        return;
+        return true;
       }
     } catch (err) {
-      addToast(err.message || 'Failed to create user on backend', 'warning');
+      addToast(err.message || 'Failed to create user on backend', 'error');
+      return false;
     }
-
-    // Local fallback
-    const newUser = {
-      ...userData,
-      id: `usr-${Date.now()}`,
-      lastActive: 'Just now',
-      queriesCount: 0,
-      avatar: userData.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80'
-    };
-    setUsers(prev => [newUser, ...prev]);
   };
 
   const editUser = async (userId, updatedFields) => {
@@ -468,8 +516,7 @@ export function AppProvider({ children }) {
       addToast('User details updated in MongoDB', 'success');
       refreshBackendData();
     } catch (err) {
-      setUsers(prev => prev.map(u => u.id === userId || u._id === userId ? { ...u, ...updatedFields } : u));
-      addToast('User details updated', 'success');
+      addToast(`Update failed: ${err.message}`, 'error');
     }
   };
 
@@ -480,8 +527,7 @@ export function AppProvider({ children }) {
       addToast('User removed from MongoDB', 'info');
       refreshBackendData();
     } catch (err) {
-      setUsers(prev => prev.filter(u => u.id !== userId && u._id !== userId));
-      addToast('User removed', 'info');
+      addToast(`Delete failed: ${err.message}`, 'error');
     }
   };
 
@@ -495,13 +541,7 @@ export function AppProvider({ children }) {
       addToast(`User status set to ${nextStatus} in MongoDB`, 'info');
       refreshBackendData();
     } catch (err) {
-      setUsers(prev => prev.map(u => {
-        if (u.id === userId || u._id === userId) {
-          return { ...u, status: nextStatus };
-        }
-        return u;
-      }));
-      addToast(`User status set to ${nextStatus}`, 'info');
+      addToast(`Status update failed: ${err.message}`, 'error');
     }
   };
 
@@ -518,24 +558,12 @@ export function AppProvider({ children }) {
       if (res?.success) {
         addToast(`Organization ${orgData.name} provisioned in MongoDB`, 'success');
         refreshBackendData();
-        return;
+        return true;
       }
     } catch (err) {
-      console.warn('Backend org creation fallback:', err.message);
+      addToast(err.message || 'Failed to create organization', 'error');
+      return false;
     }
-
-    const newOrg = {
-      ...orgData,
-      id: `org-${Date.now()}`,
-      createdAt: new Date().toISOString().split('T')[0],
-      activeUsers: 1,
-      documentsCount: 0,
-      storageUsed: '0 MB',
-      status: 'Active',
-      color: 'indigo'
-    };
-    setOrganizations(prev => [...prev, newOrg]);
-    addToast(`Organization ${newOrg.name} registered`, 'success');
   };
 
   // Chat Operations
@@ -552,7 +580,13 @@ export function AppProvider({ children }) {
     setActiveSessionId(newId);
   };
 
-  const deleteSession = (sessionId) => {
+  const deleteSession = async (sessionId) => {
+    try {
+      if (sessionId && !sessionId.startsWith('chat-')) {
+        await api.deleteConversation(sessionId);
+      }
+    } catch (e) {}
+
     setChatSessions(prev => {
       const remaining = prev.filter(s => s.id !== sessionId);
       if (activeSessionId === sessionId) {
@@ -618,6 +652,8 @@ export function AppProvider({ children }) {
             text: chatRes.data.answer,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             citations: chatRes.data.citations || [],
+            searchedDocuments: chatRes.data.searchedDocuments || [],
+            rewrittenQuery: chatRes.data.rewrittenQuery,
             isDenied: false,
             model: chatRes.data.model,
             feedback: null
@@ -642,7 +678,7 @@ export function AppProvider({ children }) {
           return;
         }
       } catch (err) {
-        console.warn('[RAG API] Real chat query error, using grounded fallback:', err.message);
+        console.warn('[RAG API] Real chat query error:', err.message);
         
         // If error was 403 Access Denied
         if (err.status === 403 || err.message?.includes('Access Denied')) {
@@ -659,44 +695,26 @@ export function AppProvider({ children }) {
           setIsAiTyping(false);
           return;
         }
-      }
 
-      // Offline resilient fallback
-      const lower = text.toLowerCase();
-      let responseData = MOCK_RESPONSES.generic;
-
-      if (currentUser.role === 'Employee' && (lower.includes('financial') || lower.includes('q3') || lower.includes('audit report') || lower.includes('restricted'))) {
-        responseData = MOCK_RESPONSES.restricted;
-      } else if (lower.includes('password') || lower.includes('mfa') || lower.includes('rotation') || lower.includes('conduct')) {
-        responseData = MOCK_RESPONSES.password;
-      } else if (lower.includes('remote') || lower.includes('pto') || lower.includes('vacation') || lower.includes('wellness') || lower.includes('benefit')) {
-        responseData = MOCK_RESPONSES.pto;
-      } else if (lower.includes('titan') || lower.includes('architecture') || lower.includes('encryption') || lower.includes('vector') || lower.includes('qdrant')) {
-        if (currentUser.role === 'Employee') {
-          responseData = {
-            text: `⚠️ **ACCESS RESTRICTED: Confidential Classification**\n\nThe Project Titan Technical Specification requires Manager or Admin clearance. As an Employee, your current RBAC filter blocks retrieval of Confidential vectors.`,
-            citations: [],
-            isDenied: true
-          };
-        } else {
-          responseData = MOCK_RESPONSES.security;
+        // Real error reporting from backend
+        let errText = err.message || 'Unable to retrieve answer from backend.';
+        if (errText.includes('quota') || errText.includes('RESOURCE_EXHAUSTED')) {
+          errText = 'Gemini API free tier quota exceeded. Please wait for quota window reset or provide a custom GEMINI_API_KEY in backend/.env.';
         }
-      } else if (lower.includes('incident') || lower.includes('disaster') || lower.includes('breach') || lower.includes('containment')) {
-        responseData = MOCK_RESPONSES.incident;
+
+        const realErrorMsg = {
+          id: `msg-${Date.now() + 1}`,
+          sender: 'ai',
+          text: `⚠️ **RAG Retrieval Notice**\n\n${errText}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          citations: [],
+          isDenied: false,
+          feedback: null
+        };
+
+        setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, realErrorMsg] } : s));
+        setIsAiTyping(false);
       }
-
-      const fallbackMsg = {
-        id: `msg-${Date.now() + 1}`,
-        sender: 'ai',
-        text: responseData.text,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        citations: responseData.citations || [],
-        isDenied: !!responseData.isDenied,
-        feedback: null
-      };
-
-      setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, fallbackMsg] } : s));
-      setIsAiTyping(false);
     })();
   };
 
@@ -719,6 +737,233 @@ export function AppProvider({ children }) {
     addToast(`Feedback recorded: ${feedbackType === 'up' ? 'Helpful' : 'Needs Improvement'}`, 'info');
   };
 
+  // Phase 8 Document Intelligence Operations
+  const runDocumentSummary = async (documentId, summaryType = 'detailed') => {
+    const doc = documents.find(d => d.id === documentId || d._id === documentId);
+    const docName = doc ? (doc.name || doc.title) : 'Document';
+    const userPrompt = `Summarize ${docName} (${summaryType.replace(/_/g, ' ')})`;
+
+    let targetSessionId = activeSessionId;
+    if (!targetSessionId || !chatSessions.find(s => s.id === targetSessionId)) {
+      const newId = `chat-${Date.now()}`;
+      const newSession = {
+        id: newId,
+        title: userPrompt,
+        createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        documentScope: documentId,
+        messages: []
+      };
+      setChatSessions(prev => [newSession, ...prev]);
+      targetSessionId = newId;
+      setActiveSessionId(newId);
+    }
+
+    const userMessage = {
+      id: `msg-${Date.now()}`,
+      sender: 'user',
+      text: userPrompt,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    setChatSessions(prev => prev.map(s => {
+      if (s.id === targetSessionId) {
+        return {
+          ...s,
+          title: s.messages.length === 0 ? userPrompt : s.title,
+          documentScope: documentId,
+          messages: [...s.messages, userMessage]
+        };
+      }
+      return s;
+    }));
+
+    setIsAiTyping(true);
+    try {
+      const res = await api.summarizeDocument(documentId, summaryType);
+      if (res?.success && res.data) {
+        const aiMessage = {
+          id: `msg-${Date.now() + 1}`,
+          sender: 'ai',
+          text: res.data.summary,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          citations: (res.data.citations || []).map(c => ({
+            ...c,
+            docName: c.docName || docName,
+            matchScore: 'Authoritative Summary'
+          })),
+          isDenied: false,
+          model: res.data.model,
+          feedback: null
+        };
+        setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, aiMessage] } : s));
+      }
+    } catch (err) {
+      const errorMsg = {
+        id: `msg-${Date.now() + 1}`,
+        sender: 'ai',
+        text: `⚠️ **Document Summarization Failed**\n\n${err.message || 'Unable to generate summary.'}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        citations: [],
+        isDenied: err.status === 403,
+        feedback: null
+      };
+      setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, errorMsg] } : s));
+    } finally {
+      setIsAiTyping(false);
+    }
+  };
+
+  const runDocumentComparison = async (documentIds, comparisonFields = []) => {
+    const docNames = documentIds.map(id => {
+      const doc = documents.find(d => d.id === id || d._id === id);
+      return doc ? (doc.name || doc.title) : id;
+    });
+    const userPrompt = `Compare documents: ${docNames.join(' vs ')}`;
+
+    let targetSessionId = activeSessionId;
+    if (!targetSessionId || !chatSessions.find(s => s.id === targetSessionId)) {
+      const newId = `chat-${Date.now()}`;
+      const newSession = {
+        id: newId,
+        title: userPrompt,
+        createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        documentScope: documentIds,
+        messages: []
+      };
+      setChatSessions(prev => [newSession, ...prev]);
+      targetSessionId = newId;
+      setActiveSessionId(newId);
+    }
+
+    const userMessage = {
+      id: `msg-${Date.now()}`,
+      sender: 'user',
+      text: userPrompt,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    setChatSessions(prev => prev.map(s => {
+      if (s.id === targetSessionId) {
+        return {
+          ...s,
+          title: s.messages.length === 0 ? userPrompt : s.title,
+          documentScope: documentIds,
+          messages: [...s.messages, userMessage]
+        };
+      }
+      return s;
+    }));
+
+    setIsAiTyping(true);
+    try {
+      const res = await api.compareDocuments(documentIds, comparisonFields);
+      if (res?.success && res.data) {
+        const aiMessage = {
+          id: `msg-${Date.now() + 1}`,
+          sender: 'ai',
+          text: res.data.comparison,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          citations: (res.data.citations || []).map(c => ({
+            ...c,
+            matchScore: 'Cross-Document Comparison'
+          })),
+          isDenied: false,
+          model: res.data.model,
+          feedback: null
+        };
+        setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, aiMessage] } : s));
+      }
+    } catch (err) {
+      const errorMsg = {
+        id: `msg-${Date.now() + 1}`,
+        sender: 'ai',
+        text: `⚠️ **Document Comparison Failed**\n\n${err.message || 'Unable to compare documents.'}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        citations: [],
+        isDenied: err.status === 403,
+        feedback: null
+      };
+      setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, errorMsg] } : s));
+    } finally {
+      setIsAiTyping(false);
+    }
+  };
+
+  const runDocumentExtraction = async (documentId, extractionType = 'technologies', customSchema = null) => {
+    const doc = documents.find(d => d.id === documentId || d._id === documentId);
+    const docName = doc ? (doc.name || doc.title) : 'Document';
+    const userPrompt = `Extract ${extractionType.replace(/_/g, ' ')} from ${docName}`;
+
+    let targetSessionId = activeSessionId;
+    if (!targetSessionId || !chatSessions.find(s => s.id === targetSessionId)) {
+      const newId = `chat-${Date.now()}`;
+      const newSession = {
+        id: newId,
+        title: userPrompt,
+        createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        documentScope: documentId,
+        messages: []
+      };
+      setChatSessions(prev => [newSession, ...prev]);
+      targetSessionId = newId;
+      setActiveSessionId(newId);
+    }
+
+    const userMessage = {
+      id: `msg-${Date.now()}`,
+      sender: 'user',
+      text: userPrompt,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    setChatSessions(prev => prev.map(s => {
+      if (s.id === targetSessionId) {
+        return {
+          ...s,
+          title: s.messages.length === 0 ? userPrompt : s.title,
+          documentScope: documentId,
+          messages: [...s.messages, userMessage]
+        };
+      }
+      return s;
+    }));
+
+    setIsAiTyping(true);
+    try {
+      const res = await api.extractDocumentInfo(documentId, extractionType, customSchema);
+      if (res?.success && res.data) {
+        const aiMessage = {
+          id: `msg-${Date.now() + 1}`,
+          sender: 'ai',
+          text: res.data.markdown,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          citations: (res.data.citations || []).map(c => ({
+            ...c,
+            docName: c.docName || docName,
+            matchScore: 'Validated Extraction'
+          })),
+          isDenied: false,
+          model: res.data.model,
+          feedback: null
+        };
+        setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, aiMessage] } : s));
+      }
+    } catch (err) {
+      const errorMsg = {
+        id: `msg-${Date.now() + 1}`,
+        sender: 'ai',
+        text: `⚠️ **Structured Extraction Failed**\n\n${err.message || 'Unable to extract information.'}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        citations: [],
+        isDenied: err.status === 403,
+        feedback: null
+      };
+      setChatSessions(prev => prev.map(s => s.id === targetSessionId ? { ...s, messages: [...s.messages, errorMsg] } : s));
+    } finally {
+      setIsAiTyping(false);
+    }
+  };
+
   // Settings update
   const updateSettings = (section, data) => {
     setSettings(prev => ({
@@ -731,7 +976,7 @@ export function AppProvider({ children }) {
     addToast('Settings updated successfully', 'success');
   };
 
-  // Reset demo
+  // Clear local storage and resync live data
   const resetAllDemoData = () => {
     localStorage.removeItem('securerag_user');
     localStorage.removeItem('securerag_auth');
@@ -745,14 +990,14 @@ export function AppProvider({ children }) {
 
     setCurrentUser(DEMO_ROLES.admin);
     setIsLoggedIn(true);
-    setOrganizations(INITIAL_ORGANIZATIONS);
-    setUsers(INITIAL_USERS);
-    setDocuments(INITIAL_DOCUMENTS);
-    setAuditLogs(INITIAL_AUDIT_LOGS);
-    setChatSessions(INITIAL_CHAT_SESSIONS);
-    setActiveSessionId(INITIAL_CHAT_SESSIONS[0].id);
+    setOrganizations([]);
+    setUsers([]);
+    setDocuments([]);
+    setAuditLogs([]);
+    setChatSessions([]);
+    setActiveSessionId(null);
 
-    addToast('All demo data has been reset to default', 'info');
+    addToast('Local caches cleared. Resyncing live data from MongoDB Atlas...', 'info');
     refreshBackendData();
   };
 
@@ -788,6 +1033,9 @@ export function AppProvider({ children }) {
         createNewSession,
         deleteSession,
         sendMessage,
+        runDocumentSummary,
+        runDocumentComparison,
+        runDocumentExtraction,
         setFeedback,
         isAiTyping,
         settings,

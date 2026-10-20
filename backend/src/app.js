@@ -15,6 +15,7 @@ import { errorHandler, notFoundHandler } from './middleware/error.middleware.js'
 import { getDatabaseStatus } from './config/db.js';
 import { getEmbeddingStatus } from './services/embedding.service.js';
 import { getQdrantStatus } from './services/qdrant.service.js';
+import { getGenerationStatus } from './services/gemini.service.js';
 
 export function createApp() {
   const app = express();
@@ -25,14 +26,27 @@ export function createApp() {
     crossOriginEmbedderPolicy: false
   }));
 
-  // CORS configuration
-  const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+  // Controlled CORS configuration with support for comma-separated origins and reverse-proxy same-origin requests
+  const rawOrigins = process.env.CLIENT_ORIGIN || process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'http://localhost:5173';
+  const configuredOrigins = rawOrigins.split(',').map(o => o.trim()).filter(Boolean);
+  const devOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:80', 'http://localhost:5000'];
+  const allowedOrigins = process.env.NODE_ENV === 'production'
+    ? configuredOrigins
+    : Array.from(new Set([...configuredOrigins, ...devOrigins]));
+
   app.use(
     cors({
-      origin: [clientOrigin, 'http://127.0.0.1:5173', 'http://localhost:5173'],
+      origin: (origin, callback) => {
+        // Allow requests with no origin (e.g., curl, same-origin reverse proxy)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+          return callback(null, true);
+        }
+        return callback(null, false);
+      },
       credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Request-Id']
     })
   );
 
@@ -76,7 +90,7 @@ export function createApp() {
   app.use('/api', limiter);
   app.use('/api/auth/login', authLimiter);
   app.use('/api/auth/register', authLimiter);
-  app.use('/api/chat/ask', chatLimiter);
+  app.use('/api/chat', chatLimiter);
   app.use('/api/documents/upload', uploadLimiter);
 
   // Body and cookie parsing
@@ -89,6 +103,7 @@ export function createApp() {
     const dbStatus = getDatabaseStatus();
     const embStatus = getEmbeddingStatus();
     const qdrantStatus = getQdrantStatus();
+    const geminiStatus = getGenerationStatus();
 
     // Overall status: healthy if DB is connected and embeddings are ready, degraded if running in mock/fallback
     const isDegraded = 
@@ -109,7 +124,8 @@ export function createApp() {
       subsystems: {
         database: dbStatus,
         embedding: embStatus,
-        vectorStore: qdrantStatus
+        vectorStore: qdrantStatus,
+        gemini: geminiStatus
       }
     });
   });

@@ -1,0 +1,135 @@
+name: SecureRAG Continuous Integration & Verification
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # 1. Frontend Build & Quality Checks
+  # ----------------------------------------------------------------------------
+  frontend-ci:
+    name: Frontend Lint & Production Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Run Linter (oxlint)
+        run: npm run lint
+
+      - name: Verify Production Bundle Build
+        env:
+          VITE_API_URL: /api
+        run: npm run build
+
+      - name: Upload Production Dist Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+          retention-days: 7
+
+  # ----------------------------------------------------------------------------
+  # 2. Backend Automated Test Suite & RAG Eval
+  # ----------------------------------------------------------------------------
+  backend-ci:
+    name: Backend Test Suite & RAG Evaluation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'backend/package-lock.json'
+
+      - name: Install Backend Dependencies
+        run: npm ci
+
+      - name: Execute Full Automated Test Suite
+        env:
+          NODE_ENV: test
+          ALLOW_MEMORY_DB: 'true'
+          ALLOW_MEMORY_VECTOR: 'true'
+          JWT_SECRET: ci_test_jwt_secret_token_at_least_32_characters_long
+          PORT: 5001
+        run: npm test
+
+      - name: Execute RAG Evaluation Benchmark
+        env:
+          NODE_ENV: test
+          ALLOW_MEMORY_DB: 'true'
+          ALLOW_MEMORY_VECTOR: 'true'
+        run: npm run eval
+
+  # ----------------------------------------------------------------------------
+  # 3. Security Vulnerability Scan
+  # ----------------------------------------------------------------------------
+  security-audit:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Audit Frontend Dependencies
+        run: npm audit --audit-level=high || true
+
+      - name: Audit Backend Dependencies
+        working-directory: backend
+        run: npm audit --audit-level=high || true
+
+  # ----------------------------------------------------------------------------
+  # 4. Container Build Verification
+  # ----------------------------------------------------------------------------
+  docker-build-verification:
+    name: Verify Production Docker Images
+    runs-on: ubuntu-latest
+    needs: [frontend-ci, backend-ci]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Backend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          tags: securerag-backend:ci
+
+      - name: Build Frontend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: securerag-frontend:ci
+          build-args: |
+            VITE_API_URL=/api

@@ -10,7 +10,50 @@ import { upsertChunks } from '../services/qdrant.service.js';
 export async function seedInitialData() {
   const orgCount = await Organization.countDocuments();
   if (orgCount > 0) {
-    console.log('[Seed] Database already seeded. Skipping initial bootstrap.');
+    // Database seeded; check if initial documents need vector synchronization in Qdrant
+    try {
+      const { searchVectorIndex } = await import('../services/qdrant.service.js');
+      const docs = await Document.find({ title: { $in: [
+        'Company Policy & Code of Conduct 2025.pdf',
+        'Employee Handbook & Benefits Guide.pdf',
+        'Project Titan Architecture & Security Spec.pdf',
+        'Q3 Executive Financial & Audit Report.pdf'
+      ] } });
+
+      for (const doc of docs) {
+        const dummyVec = new Array(768).fill(0.01);
+        const matches = await searchVectorIndex(dummyVec, {
+          organizationId: String(doc.organizationId),
+          documentId: String(doc._id)
+        }, 1, 0);
+
+        if (matches.length === 0) {
+          const textPassages = [
+            `${doc.title}: ${doc.summary}`,
+            `Details from ${doc.title}: ${doc.excerpt}`
+          ];
+          for (let pIdx = 0; pIdx < textPassages.length; pIdx++) {
+            const text = textPassages[pIdx];
+            const emb = await generateEmbedding(text);
+            await upsertChunks([{
+              chunkIndex: pIdx,
+              chunkId: `init_${doc._id}_${pIdx}`,
+              text,
+              vector: emb.embedding,
+              page: pIdx + 1,
+              documentId: String(doc._id),
+              docName: doc.title,
+              organizationId: String(doc.organizationId),
+              accessLevel: doc.accessLevel,
+              allowedRoles: doc.allowedRoles
+            }]);
+          }
+          console.log(`[Seed Sync] Synchronized vectors into Qdrant for "${doc.title}"`);
+        }
+      }
+    } catch (e) {
+      console.warn('[Seed Sync] Vector check notice:', e.message);
+    }
     return;
   }
 

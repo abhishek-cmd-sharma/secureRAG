@@ -60,7 +60,7 @@ const documentSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: ['uploaded', 'processing', 'indexed', 'failed', 'Indexed', 'Processing', 'Ready', 'Archived', 'Failed'],
-      default: 'indexed'
+      default: 'processing'
     },
     chunksCount: {
       type: Number,
@@ -68,7 +68,7 @@ const documentSchema = new mongoose.Schema(
     },
     embeddingModel: {
       type: String,
-      default: 'text-embedding-004'
+      default: 'gemini-embedding-001'
     },
     processingError: {
       type: String,

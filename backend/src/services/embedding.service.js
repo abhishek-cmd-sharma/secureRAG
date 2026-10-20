@@ -32,50 +32,62 @@ export async function generateEmbedding(text) {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (apiKey && apiKey !== 'mock_key' && !apiKey.startsWith('demo')) {
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.embedContent({
-        model: EMBEDDING_MODEL,
-        contents: text,
-        config: {
-          outputDimensionality: EMBEDDING_DIMENSION
-        }
-      });
-
-      // Google GenAI SDK returns embeddings array
-      const values = response?.embeddings?.[0]?.values || response?.embedding?.values;
-      if (Array.isArray(values) && values.length > 0) {
-        validateVector(values, EMBEDDING_DIMENSION);
-        lastEmbeddingStatus = {
-          status: 'connected',
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const ai = new GoogleGenAI({ apiKey });
+        const response = await ai.models.embedContent({
           model: EMBEDDING_MODEL,
-          dimension: values.length,
-          provider: 'google_genai_live',
-          lastError: null,
+          contents: text,
+          config: {
+            outputDimensionality: EMBEDDING_DIMENSION
+          }
+        });
+
+        // Google GenAI SDK returns embeddings array
+        const values = response?.embeddings?.[0]?.values || response?.embedding?.values;
+        if (Array.isArray(values) && values.length > 0) {
+          validateVector(values, EMBEDDING_DIMENSION);
+          lastEmbeddingStatus = {
+            status: 'connected',
+            model: EMBEDDING_MODEL,
+            dimension: values.length,
+            provider: 'google_genai_live',
+            lastError: null,
+            lastUpdated: new Date().toISOString()
+          };
+          return {
+            embedding: values,
+            model: EMBEDDING_MODEL,
+            dimension: values.length,
+            isRealEmbedding: true
+          };
+        } else {
+          throw new Error('Gemini API returned empty vector array.');
+        }
+      } catch (err) {
+        const isTransient = err.status === 503 || err.status === 429 || err.message?.includes('unavailable') || err.message?.includes('high demand') || err.message?.includes('overloaded');
+        if (isTransient && attempt < maxRetries) {
+          const delay = (attempt + 1) * 1500;
+          console.warn(`[Embedding] Transient Gemini API error (${err.message}). Retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})...`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+
+        console.warn(`[Embedding] Live Gemini API call failed (${err.message}).`);
+        lastEmbeddingStatus = {
+          status: 'degraded',
+          model: EMBEDDING_MODEL,
+          dimension: EMBEDDING_DIMENSION,
+          provider: 'fallback_mock',
+          lastError: err.message,
           lastUpdated: new Date().toISOString()
         };
-        return {
-          embedding: values,
-          model: EMBEDDING_MODEL,
-          dimension: values.length,
-          isRealEmbedding: true
-        };
-      } else {
-        throw new Error('Gemini API returned empty vector array.');
-      }
-    } catch (err) {
-      console.warn(`[Embedding] Live Gemini API call failed (${err.message}).`);
-      lastEmbeddingStatus = {
-        status: 'degraded',
-        model: EMBEDDING_MODEL,
-        dimension: EMBEDDING_DIMENSION,
-        provider: 'fallback_mock',
-        lastError: err.message,
-        lastUpdated: new Date().toISOString()
-      };
 
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error(`Production Embedding Error: ${err.message}`);
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error(`Production Embedding Error: ${err.message}`);
+        }
+        break;
       }
     }
   }

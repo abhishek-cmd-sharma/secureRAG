@@ -6,6 +6,7 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { createApp } from '../src/app.js';
 import { seedInitialData } from '../src/utils/seed.js';
+import { initializeQdrant } from '../src/services/qdrant.service.js';
 
 let mongod;
 let app;
@@ -33,6 +34,7 @@ before(async () => {
   mongod = await MongoMemoryServer.create();
   const uri = mongod.getUri();
   await mongoose.connect(uri);
+  await initializeQdrant();
   await seedInitialData();
   app = createApp();
 
@@ -166,6 +168,23 @@ describe('4. Real PDF Upload and Validation', () => {
     assert.equal(res.body.success, true);
     assert.equal(res.body.data.status, 'indexed');
     assert.ok(res.body.data.chunksCount > 0);
+  });
+
+  it('Duplicate upload safely purges previous vectors and replaces record without errors', async () => {
+    const updatedPdfBuffer = await createTestPdfBuffer(
+      'NovaCorp Zero Trust Security Protocol v2: All employees must authenticate using biometric security keys.'
+    );
+
+    const res = await request(app)
+      .post('/api/documents/upload')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .field('title', 'Zero Trust Security Protocol.pdf')
+      .field('accessLevel', 'Internal')
+      .attach('file', updatedPdfBuffer, 'zerotrust.pdf');
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.data.status, 'indexed');
   });
 });
 

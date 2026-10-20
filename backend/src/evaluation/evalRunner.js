@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { createApp } from '../app.js';
 import { seedInitialData } from '../utils/seed.js';
+import { initializeQdrant } from '../services/qdrant.service.js';
 import { EVALUATION_DATASET } from './evalDataset.js';
 import request from 'supertest';
 
@@ -24,6 +25,7 @@ export async function runRagEvaluation() {
     process.env.JWT_SECRET = 'eval_secret_key_32_characters_benchmark!';
     mongod = await MongoMemoryServer.create({ instance: { launchTimeout: 30000 } });
     await mongoose.connect(mongod.getUri());
+    await initializeQdrant();
     await seedInitialData();
   }
 

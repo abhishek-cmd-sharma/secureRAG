@@ -74,7 +74,7 @@ export function Documents() {
       }
 
       // 5. Status
-      if (selectedStatus !== 'All' && doc.status !== selectedStatus) {
+      if (selectedStatus !== 'All' && (doc.status || '').toLowerCase() !== selectedStatus.toLowerCase()) {
         return false;
       }
 

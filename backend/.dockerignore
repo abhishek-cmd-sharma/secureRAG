@@ -1,0 +1,12 @@
+node_modules
+tests
+storage
+.env*
+.git
+.gitignore
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+Dockerfile*
+docker-compose*
+README.md

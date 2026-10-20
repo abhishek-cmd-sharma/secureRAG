@@ -62,28 +62,10 @@ export function AuditLogs() {
     });
   }, [auditLogs, searchTerm, selectedAction, selectedResult, selectedOrg]);
 
-  const handleExportCSV = async () => {
-    try {
-      const response = await fetch('http://localhost:5000/api/audit-logs/export/csv', {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('securerag_jwt_token')}`
-        }
-      });
-      if (response.ok && response.headers.get('content-type')?.includes('text/csv')) {
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.setAttribute('href', url);
-        link.setAttribute('download', `securerag-audit-live-${new Date().toISOString().split('T')[0]}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-        addToast('Server-verified audit log CSV exported successfully', 'success');
-        return;
-      }
-    } catch (e) {
-      console.warn('Backend CSV stream fallback:', e.message);
+  const handleExportCSV = () => {
+    if (filteredLogs.length === 0) {
+      addToast('No matching audit records to export.', 'warning');
+      return;
     }
 
     const exportPayload = filteredLogs.map(log => ({
@@ -99,8 +81,8 @@ export function AuditLogs() {
       Details: log.details
     }));
 
-    exportToCSV(exportPayload, `securerag-audit-${new Date().toISOString().split('T')[0]}.csv`);
-    addToast('Audit log CSV exported successfully', 'success');
+    exportToCSV(exportPayload, `securerag-audit-filtered-${new Date().toISOString().split('T')[0]}.csv`);
+    addToast(`Exported ${filteredLogs.length} filtered audit records to CSV`, 'success');
   };
 
   return (
@@ -113,13 +95,13 @@ export function AuditLogs() {
               Security Governance
             </span>
             <span className="text-slate-400 text-xs">•</span>
-            <span className="text-xs text-slate-500 font-medium">Immutable Trail</span>
+            <span className="text-xs text-slate-500 font-medium">Audit Trail</span>
           </div>
           <h2 className="text-xl sm:text-2xl font-bold text-slate-900 mt-1">
-            Security & Compliance Audit Logs
+            Security & Access Audit Logs
           </h2>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            Cryptographically verifiable record of document ingestion, semantic queries, permission validations, and administrative changes.
+            Persistent audit log of document ingestion, semantic queries, permission validations, and administrative events.
           </p>
         </div>
 
@@ -129,7 +111,7 @@ export function AuditLogs() {
           className="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-slate-800 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl transition-all shadow-xs self-start sm:self-auto cursor-pointer"
         >
           <Download className="w-4 h-4 text-indigo-600" />
-          <span>Export Audit CSV</span>
+          <span>Export Filtered CSV ({filteredLogs.length})</span>
         </button>
       </div>
 
@@ -138,15 +120,15 @@ export function AuditLogs() {
         <div className="flex items-center gap-2.5">
           <ShieldCheck className="w-5 h-5 text-indigo-600 shrink-0" />
           <div>
-            <span className="font-bold">SOC 2 Type II & HIPAA Audit Standard:</span>
+            <span className="font-bold">Zero-Trust Audit Logging & Event Tracking:</span>
             <p className="text-[11px] text-indigo-800 mt-0.5">
-              Simulated security logs. All document access attempts and AI queries are tracked in real-time with zero-retention data mask filters.
+              All document access attempts, query evaluations, and role permissions are tracked and persisted in MongoDB Atlas.
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-[11px] font-bold text-emerald-700">Live Monitor Active</span>
+          <span className="text-[11px] font-bold text-emerald-700">Audit System Active</span>
         </div>
       </div>
 

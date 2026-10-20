@@ -32,11 +32,11 @@ export function Settings() {
   const [orgForm, setOrgForm] = useState(settings.organization);
   const [securityForm, setSecurityForm] = useState(settings.security);
 
-  // Mock API keys
-  const [apiKeys, setApiKeys] = useState([
-    { id: 'key-1', name: 'Production Backend Ingestion', prefix: 'secrag_live_8f92***', created: '2025-01-15' },
-    { id: 'key-2', name: 'Internal Search Slackbot', prefix: 'secrag_live_3b11***', created: '2025-02-04' }
-  ]);
+  // API keys (persisted in local storage)
+  const [apiKeys, setApiKeys] = useState(() => {
+    const saved = localStorage.getItem('securerag_api_keys');
+    return saved ? JSON.parse(saved) : [];
+  });
 
   const handleSaveProfile = (e) => {
     e.preventDefault();
@@ -70,12 +70,16 @@ export function Settings() {
       prefix: `secrag_live_${Math.random().toString(36).substring(2, 6)}***`,
       created: new Date().toISOString().split('T')[0]
     };
-    setApiKeys(prev => [newKey, ...prev]);
+    const updated = [newKey, ...apiKeys];
+    setApiKeys(updated);
+    localStorage.setItem('securerag_api_keys', JSON.stringify(updated));
     addToast('New API key generated. Ensure you copy the secret token.', 'success');
   };
 
   const handleRevokeKey = (keyId) => {
-    setApiKeys(prev => prev.filter(k => k.id !== keyId));
+    const updated = apiKeys.filter(k => k.id !== keyId);
+    setApiKeys(updated);
+    localStorage.setItem('securerag_api_keys', JSON.stringify(updated));
     addToast('API Key revoked', 'info');
   };
 
@@ -106,17 +110,17 @@ export function Settings() {
             Enterprise Settings & Preferences
           </h2>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            Configure account profiles, security parameters, vector search thresholds, and simulated API tokens.
+            Configure account profiles, security parameters, vector search thresholds, and API integration tokens.
           </p>
         </div>
 
-        {/* Reset Demo Data Button */}
+        {/* Resync Live Data Button */}
         <button
           onClick={() => setResetConfirmOpen(true)}
-          className="flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-600 hover:text-rose-600 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 rounded-xl transition-all shadow-2xs self-start sm:self-auto cursor-pointer"
+          className="flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-600 hover:text-indigo-600 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded-xl transition-all shadow-2xs self-start sm:self-auto cursor-pointer"
         >
           <RotateCcw className="w-4 h-4" />
-          <span>Reset Demo Defaults</span>
+          <span>Clear Cache & Resync Live Data</span>
         </button>
       </div>
 
@@ -525,7 +529,7 @@ export function Settings() {
         </div>
       </div>
 
-      {/* Reset Confirmation Dialog */}
+      {/* Resync Confirmation Dialog */}
       <ConfirmDialog
         isOpen={resetConfirmOpen}
         onClose={() => setResetConfirmOpen(false)}
@@ -533,9 +537,9 @@ export function Settings() {
           resetAllDemoData();
           setResetConfirmOpen(false);
         }}
-        title="Reset All Demo Data"
-        message="This will reset all modified users, uploaded documents, new chat conversations, and custom settings back to initial factory demo state."
-        confirmText="Confirm Reset"
+        title="Clear Local Cache & Resync Live Data"
+        message="This will clear cached local browser storage and reload all real documents, users, organizations, and chat conversations directly from MongoDB Atlas and Qdrant."
+        confirmText="Confirm Resync"
         isDestructive={false}
       />
     </div>

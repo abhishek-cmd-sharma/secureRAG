@@ -26,3 +26,9 @@ dist-ssr
 .env.*
 !.env.example
 
+# Uploads
+backend/storage/uploads/*
+!backend/storage/uploads/.gitkeep
+storage/uploads/*
+!storage/uploads/.gitkeep
+

@@ -4,7 +4,7 @@ import crypto from 'crypto';
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY || '';
 const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'securerag_chunks';
-const VECTOR_DIMENSION = 768; // Matching text-embedding-004
+const VECTOR_DIMENSION = parseInt(process.env.EMBEDDING_DIMENSION || '768', 10);
 
 /**
  * In-memory fallback vector storage for zero-dependency local runs and testing.
@@ -34,6 +34,19 @@ class InMemoryVectorStore {
       }
     }
     return count;
+  }
+
+  getChunks(documentId, organizationId) {
+    const list = [];
+    for (const point of this.points.values()) {
+      const payload = point.payload;
+      if (organizationId && String(payload.organizationId) !== String(organizationId)) continue;
+      if (String(payload.documentId) === String(documentId)) {
+        list.push({ ...payload, id: point.id });
+      }
+    }
+    list.sort((a, b) => (a.page - b.page) || (a.chunkIndex - b.chunkIndex));
+    return list;
   }
 
   search(queryVector, filter = {}, limit = 5, scoreThreshold = 0) {
@@ -102,21 +115,32 @@ const memoryStore = new InMemoryVectorStore();
 let isQdrantOnline = false;
 let qdrantClient = null;
 
-try {
-  if (QDRANT_URL) {
-    qdrantClient = new QdrantClient({
+function getClient() {
+  if (qdrantClient) return qdrantClient;
+  if (!QDRANT_URL) return null;
+
+  try {
+    const clientOptions = {
       url: QDRANT_URL,
-      apiKey: QDRANT_API_KEY || undefined,
       checkCompatibility: false
-    });
+    };
+    if (QDRANT_API_KEY && QDRANT_API_KEY.trim() !== '') {
+      clientOptions.apiKey = QDRANT_API_KEY.trim();
+    }
+    qdrantClient = new QdrantClient(clientOptions);
+    return qdrantClient;
+  } catch (err) {
+    console.warn('[Qdrant] Could not initialize QdrantClient:', err.message);
+    return null;
   }
-} catch (e) {
-  console.warn('[Qdrant] Could not initialize QdrantClient:', e.message);
 }
+
+// Attempt initial client instance creation
+getClient();
 
 let qdrantStatus = {
   status: 'disconnected', // 'connected', 'disconnected', 'mock_mode'
-  mode: 'untested',
+  mode: 'untested',       // 'real_qdrant', 'in_memory_fallback', 'untested'
   url: QDRANT_URL,
   collection: COLLECTION_NAME,
   dimension: VECTOR_DIMENSION,
@@ -124,16 +148,26 @@ let qdrantStatus = {
 };
 
 export function getQdrantStatus() {
-  return { ...qdrantStatus };
+  // Always sanitize to ensure secrets are never leaked
+  return {
+    status: qdrantStatus.status,
+    mode: qdrantStatus.mode,
+    url: qdrantStatus.url,
+    collection: qdrantStatus.collection,
+    dimension: qdrantStatus.dimension,
+    lastError: qdrantStatus.lastError
+  };
 }
 
 /**
  * Initializes or validates the Qdrant collection.
+ * Creates collection with appropriate dimension and distance metric if it does not exist.
  */
 export async function initializeQdrant() {
-  if (!qdrantClient) {
+  const client = getClient();
+  if (!client) {
     qdrantStatus = {
-      status: 'mock_mode',
+      status: 'disconnected',
       mode: 'in_memory_fallback',
       url: QDRANT_URL,
       collection: COLLECTION_NAME,
@@ -144,27 +178,49 @@ export async function initializeQdrant() {
   }
 
   try {
-    const collections = await qdrantClient.getCollections();
-    const exists = collections.collections.some(c => c.name === COLLECTION_NAME);
-    if (!exists) {
-      await qdrantClient.createCollection(COLLECTION_NAME, {
+    let collectionExists = false;
+    try {
+      const checkRes = await client.collectionExists(COLLECTION_NAME);
+      collectionExists = Boolean(checkRes?.exists);
+    } catch {
+      const collections = await client.getCollections();
+      collectionExists = collections?.collections?.some(c => c.name === COLLECTION_NAME);
+    }
+
+    if (!collectionExists) {
+      await client.createCollection(COLLECTION_NAME, {
         vectors: {
           size: VECTOR_DIMENSION,
           distance: 'Cosine'
         }
       });
-      console.log(`[Qdrant] Created collection '${COLLECTION_NAME}' with size ${VECTOR_DIMENSION}`);
+      console.log(`[Qdrant] Created collection '${COLLECTION_NAME}' with size ${VECTOR_DIMENSION} and Cosine metric`);
     }
+
+    // Ensure payload indexes exist for tenant-scoped filtering
+    try {
+      await client.createPayloadIndex(COLLECTION_NAME, {
+        field_name: 'organizationId',
+        field_schema: 'keyword'
+      });
+      await client.createPayloadIndex(COLLECTION_NAME, {
+        field_name: 'documentId',
+        field_schema: 'keyword'
+      });
+    } catch {
+      // Non-blocking: indices may already exist
+    }
+
     isQdrantOnline = true;
     qdrantStatus = {
       status: 'connected',
-      mode: 'qdrant_server',
+      mode: 'real_qdrant',
       url: QDRANT_URL,
       collection: COLLECTION_NAME,
       dimension: VECTOR_DIMENSION,
       lastError: null
     };
-    console.log(`✅ [Qdrant] Connected to real Qdrant cluster at ${QDRANT_URL}`);
+    console.log(`✅ [Qdrant] Connected to real Qdrant cluster at ${QDRANT_URL} (collection: ${COLLECTION_NAME})`);
     return true;
   } catch (err) {
     isQdrantOnline = false;
@@ -189,6 +245,10 @@ export async function initializeQdrant() {
 export async function upsertChunks(chunks) {
   if (!Array.isArray(chunks) || chunks.length === 0) return 0;
 
+  if (!isQdrantOnline) {
+    await initializeQdrant();
+  }
+
   const points = chunks.map(c => {
     // Deterministic UUID for stable point IDs
     const seed = `${c.organizationId}_${c.documentId}_${c.chunkIndex}`;
@@ -200,6 +260,7 @@ export async function upsertChunks(chunks) {
       vector: c.vector,
       payload: {
         documentId: String(c.documentId),
+        docName: c.docName || c.documentTitle || 'Document',
         organizationId: String(c.organizationId),
         chunkIndex: c.chunkIndex,
         chunkId: c.chunkId || `chunk_${c.chunkIndex}`,
@@ -214,9 +275,10 @@ export async function upsertChunks(chunks) {
   // Always mirror in memory store for guaranteed query resilience
   memoryStore.upsert(points);
 
-  if (isQdrantOnline && qdrantClient) {
+  const client = getClient();
+  if (isQdrantOnline && client) {
     try {
-      await qdrantClient.upsert(COLLECTION_NAME, {
+      await client.upsert(COLLECTION_NAME, {
         wait: true,
         points: points.map(p => ({
           id: p.id,
@@ -224,6 +286,7 @@ export async function upsertChunks(chunks) {
           payload: p.payload
         }))
       });
+      console.log(`[Qdrant Upsert] Ingested ${points.length} chunk vectors for document ID ${chunks[0]?.documentId}`);
     } catch (err) {
       console.warn(`[Qdrant] Live upsert warning: ${err.message}. Chunks stored in persistent memory store.`);
     }
@@ -249,7 +312,12 @@ export async function searchVectorIndex(queryVector, filter = {}, limit = 5, sco
     throw new Error('Security Violation: organizationId filter is required for vector retrieval.');
   }
 
-  if (isQdrantOnline && qdrantClient) {
+  if (!isQdrantOnline) {
+    await initializeQdrant();
+  }
+
+  const client = getClient();
+  if (isQdrantOnline && client) {
     try {
       const mustClauses = [
         { key: 'organizationId', match: { value: String(filter.organizationId) } }
@@ -269,17 +337,25 @@ export async function searchVectorIndex(queryVector, filter = {}, limit = 5, sco
         });
       }
 
-      const results = await qdrantClient.search(COLLECTION_NAME, {
-        vector: queryVector,
+      const queryParams = {
+        query: queryVector,
         filter: { must: mustClauses },
         limit,
-        score_threshold: scoreThreshold,
         with_payload: true
-      });
+      };
 
-      if (results && results.length > 0) {
-        return results;
+      if (typeof scoreThreshold === 'number' && scoreThreshold > 0) {
+        queryParams.score_threshold = scoreThreshold;
       }
+
+      const queryResult = await client.query(COLLECTION_NAME, queryParams);
+      const points = queryResult?.points || [];
+      console.log(`[Qdrant Search] Tenant: ${filter.organizationId}, Scoped Docs: ${filter.documentIds ? filter.documentIds.length : 'unrestricted'}, Found: ${points.length} points, Top Score: ${points[0]?.score ? (points[0].score * 100).toFixed(1) + '%' : 'none'}`);
+      return points.map(p => ({
+        id: p.id,
+        score: p.score,
+        payload: p.payload
+      }));
     } catch (err) {
       console.warn(`[Qdrant] Search error: ${err.message}. Falling back to resilient vector store.`);
     }
@@ -290,15 +366,58 @@ export async function searchVectorIndex(queryVector, filter = {}, limit = 5, sco
 }
 
 /**
+ * Retrieves all indexed chunks belonging to a document in page order.
+ * Enforces tenant isolation.
+ * 
+ * @param {string} documentId
+ * @param {string} organizationId
+ * @returns {Promise<Array<object>>}
+ */
+export async function getDocumentChunks(documentId, organizationId) {
+  if (!organizationId) {
+    throw new Error('Security Violation: organizationId is required to fetch document chunks.');
+  }
+
+  const client = getClient();
+  if (isQdrantOnline && client) {
+    try {
+      const scrollRes = await client.scroll(COLLECTION_NAME, {
+        filter: {
+          must: [
+            { key: 'organizationId', match: { value: String(organizationId) } },
+            { key: 'documentId', match: { value: String(documentId) } }
+          ]
+        },
+        limit: 100,
+        with_payload: true,
+        with_vector: false
+      });
+      const points = scrollRes?.points || [];
+      if (points.length > 0) {
+        const chunks = points.map(p => ({ ...p.payload, id: p.id }));
+        chunks.sort((a, b) => (a.page - b.page) || (a.chunkIndex - b.chunkIndex));
+        return chunks;
+      }
+    } catch (err) {
+      console.warn(`[Qdrant] getDocumentChunks error: ${err.message}. Using memory fallback.`);
+    }
+  }
+
+  return memoryStore.getChunks(documentId, organizationId);
+}
+
+/**
  * Deletes all chunks belonging to a document.
  * @param {string} documentId
  */
 export async function deleteDocumentVectors(documentId) {
   memoryStore.deleteByDocumentId(documentId);
 
-  if (isQdrantOnline && qdrantClient) {
+  const client = getClient();
+  if (isQdrantOnline && client) {
     try {
-      await qdrantClient.delete(COLLECTION_NAME, {
+      await client.delete(COLLECTION_NAME, {
+        wait: true,
         filter: {
           must: [
             { key: 'documentId', match: { value: String(documentId) } }

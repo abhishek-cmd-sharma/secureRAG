@@ -37,7 +37,10 @@ export function UserModal({ isOpen, onClose, userToEdit = null }) {
       return;
     }
 
-    const org = organizations.find(o => o.id === orgId) || organizations[0];
+    const org = organizations.find(o => (o.id && o.id === orgId) || (o._id && String(o._id) === orgId)) || organizations[0];
+    const resolvedOrgId = org?.id || (org?._id ? String(org._id) : 'org-1');
+    const resolvedOrgName = org?.name || 'NovaCorp Global';
+
     const accessScope = role === 'Admin'
       ? 'All Documents (Unrestricted)'
       : role === 'Manager'
@@ -48,8 +51,8 @@ export function UserModal({ isOpen, onClose, userToEdit = null }) {
       editUser(userToEdit.id, {
         name: name.trim(),
         email: email.trim(),
-        orgId: org.id,
-        orgName: org.name,
+        orgId: resolvedOrgId,
+        orgName: resolvedOrgName,
         role,
         status,
         accessScope
@@ -58,8 +61,8 @@ export function UserModal({ isOpen, onClose, userToEdit = null }) {
       addUser({
         name: name.trim(),
         email: email.trim(),
-        orgId: org.id,
-        orgName: org.name,
+        orgId: resolvedOrgId,
+        orgName: resolvedOrgName,
         role,
         status,
         accessScope

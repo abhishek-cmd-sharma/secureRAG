@@ -1,6 +1,4 @@
-// Reusable API client connecting frontend to Node/Express backend
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
 
 class ApiClient {
   constructor() {
@@ -68,6 +66,11 @@ class ApiClient {
       console.warn(`[API] Error on ${options.method || 'GET'} ${endpoint}:`, err.message);
       throw err;
     }
+  }
+
+  // Health check endpoint
+  async getHealth() {
+    return this.request('/health');
   }
 
   // Auth endpoints
@@ -141,11 +144,38 @@ class ApiClient {
     return this.request(`/documents/${id}/status`);
   }
 
-  // RAG Chat endpoints
-  async askQuestion(question, documentId = 'all', conversationId = null) {
+  // RAG Chat & Document Intelligence endpoints
+  async askQuestion(question, documentScope = 'all', conversationId = null) {
+    const payload = { question, conversationId };
+    if (Array.isArray(documentScope)) {
+      payload.documentIds = documentScope;
+    } else {
+      payload.documentId = documentScope;
+    }
     return this.request('/chat/ask', {
       method: 'POST',
-      body: { question, documentId, conversationId }
+      body: payload
+    });
+  }
+
+  async summarizeDocument(documentId, summaryType = 'detailed') {
+    return this.request('/chat/summarize', {
+      method: 'POST',
+      body: { documentId, summaryType }
+    });
+  }
+
+  async compareDocuments(documentIds, comparisonFields = []) {
+    return this.request('/chat/compare', {
+      method: 'POST',
+      body: { documentIds, comparisonFields }
+    });
+  }
+
+  async extractDocumentInfo(documentId, extractionType = 'technologies', customSchema = null) {
+    return this.request('/chat/extract', {
+      method: 'POST',
+      body: { documentId, extractionType, customSchema }
     });
   }
 

@@ -1,5 +1,8 @@
 export function errorHandler(err, req, res, next) {
-  console.error(`[Error] ${req.method} ${req.originalUrl}:`, err);
+  const reqId = req.id || req.headers?.['x-request-id'] || 'no-req-id';
+  if (process.env.NODE_ENV !== 'test') {
+    console.error(`[Error][${reqId}] ${req.method} ${req.originalUrl}:`, err.message || err);
+  }
 
   // Mongoose validation error
   if (err.name === 'ValidationError') {
@@ -44,9 +47,15 @@ export function errorHandler(err, req, res, next) {
   }
 
   const statusCode = err.statusCode || 500;
+  // Sanitize message in production to prevent leaking sensitive internals or database strings
+  const message = (statusCode >= 500 && process.env.NODE_ENV === 'production')
+    ? 'An unexpected internal server error occurred.'
+    : (err.message || 'Internal Server Error');
+
   res.status(statusCode).json({
     success: false,
-    message: err.message || 'Internal Server Error'
+    message,
+    ...(process.env.NODE_ENV !== 'production' && err.stack ? { stack: err.stack } : {})
   });
 }
 

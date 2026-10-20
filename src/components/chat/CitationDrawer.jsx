@@ -2,7 +2,7 @@ import React from 'react';
 import { X, FileText, CheckCircle2, ShieldCheck, Sparkles, ExternalLink } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 
-export function CitationDrawer({ isOpen, onClose, citation }) {
+export function CitationDrawer({ isOpen, onClose, citation, onPreviewDocument }) {
   if (!citation) return null;
 
   return (
@@ -27,9 +27,22 @@ export function CitationDrawer({ isOpen, onClose, citation }) {
               <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
                 <span>Page {citation.page}</span>
                 <span>•</span>
-                <span className="font-semibold text-emerald-600">Cosine Similarity: {citation.matchScore}</span>
+                <span className="font-semibold text-emerald-600">Similarity: {citation.matchScore}</span>
               </div>
             </div>
+            {onPreviewDocument && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onPreviewDocument(citation);
+                }}
+                className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
+              >
+                <span>View Full Document</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -44,11 +57,13 @@ export function CitationDrawer({ isOpen, onClose, citation }) {
         {/* Chunk text payload */}
         <div>
           <div className="flex items-center justify-between text-xs text-slate-500 mb-1.5">
-            <span className="font-semibold text-slate-700">Raw Embedding Chunk (512 tokens):</span>
-            <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-mono">Chunk #14</span>
+            <span className="font-semibold text-slate-700">Raw Embedding Chunk:</span>
+            <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-mono">
+              {citation.chunkId || 'Chunk'}
+            </span>
           </div>
-          <div className="p-4 rounded-xl bg-slate-900 text-slate-100 text-xs font-mono leading-relaxed border border-slate-800 selection:bg-indigo-600">
-            {citation.snippet || 'No raw snippet available for this citation.'}
+          <div className="p-4 rounded-xl bg-slate-900 text-slate-100 text-xs font-mono leading-relaxed border border-slate-800 selection:bg-indigo-600 max-h-60 overflow-y-auto whitespace-pre-wrap">
+            {citation.snippet || citation.excerpt || 'No raw snippet available for this citation.'}
           </div>
         </div>
 
@@ -56,7 +71,7 @@ export function CitationDrawer({ isOpen, onClose, citation }) {
         <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl flex items-center justify-between text-xs">
           <div className="flex items-center gap-2 text-emerald-800">
             <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>Verified Ground-Truth: Zero-hallucination guarantee via RAG</span>
+            <span>Grounded Context: Verified against indexed document repository</span>
           </div>
           <span className="font-bold text-emerald-700">RBAC Verified</span>
         </div>

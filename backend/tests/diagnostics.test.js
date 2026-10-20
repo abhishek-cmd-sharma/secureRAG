@@ -16,8 +16,8 @@ before(async () => {
     mongod = await MongoMemoryServer.create();
     await mongoose.connect(mongod.getUri());
   }
-  await seedInitialData();
   await initializeQdrant();
+  await seedInitialData();
 });
 
 after(async () => {
@@ -114,6 +114,36 @@ describe('Diagnostics & Subsystem Unit Tests', () => {
 
       assert.equal(orgCountAfter, orgCountBefore, 'Organization count must not increase on re-seed');
       assert.equal(userCountAfter, userCountBefore, 'User count must not increase on re-seed');
+    });
+  });
+
+  describe('4. Answer Generation Truncation & Grounding Resilience', () => {
+    it('generateAnswerWithGemini returns abstention when context is empty', async () => {
+      const { generateAnswerWithGemini } = await import('../src/services/gemini.service.js');
+      const res = await generateAnswerWithGemini('What is the remote work policy?', []);
+      assert.ok(res.answer.includes('could not find the answer in the accessible documents'));
+      assert.equal(res.finishReason, 'NO_CONTEXT');
+    });
+
+    it('generateAnswerWithGemini synthesizes complete grounded answer and tracks metrics', async () => {
+      const { generateAnswerWithGemini, getGenerationStatus } = await import('../src/services/gemini.service.js');
+      const sampleChunks = [
+        {
+          text: 'ShopSphere is a digital retail platform. Its main concept is modern inventory management for local shops. Key features include offline-first sync, WhatsApp-level ease of use, and smartphone barcode scanning.',
+          page: 2,
+          documentId: 'doc_123',
+          docName: 'ShopSphere Spec.pdf'
+        }
+      ];
+      const res = await generateAnswerWithGemini('What is ShopSphere?', sampleChunks);
+      assert.ok(res.answer, 'Must generate answer');
+      assert.ok(res.answer.length > 50, 'Must produce a substantive answer');
+      assert.ok(!res.answer.endsWith('It aims to save'), 'Must not truncate mid-sentence');
+      assert.ok(res.finishReason, 'Must include finishReason');
+      
+      const status = getGenerationStatus();
+      assert.ok(status.model);
+      assert.ok(status.status);
     });
   });
 });

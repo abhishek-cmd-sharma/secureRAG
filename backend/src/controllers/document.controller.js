@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Document } from '../models/Document.js';
-import { extractTextFromPdf } from '../services/pdf.service.js';
+import { extractTextFromPdf, extractTextFromFile } from '../services/pdf.service.js';
 import { chunkDocument } from '../services/chunking.service.js';
 import { generateEmbedding } from '../services/embedding.service.js';
 import { upsertChunks, deleteDocumentVectors } from '../services/qdrant.service.js';
@@ -196,13 +196,15 @@ export async function uploadDocument(req, res, next) {
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide a PDF file to upload.'
+        message: 'Please provide a document file (PDF, DOCX, TXT, or MD) to upload.'
       });
     }
 
     const { title, name, accessLevel = 'Internal', summary } = req.body;
     const originalFileName = req.file.originalname;
-    const documentTitle = (title || name || originalFileName.replace(/\.pdf$/i, '')).trim();
+    const ext = path.extname(originalFileName).toLowerCase();
+    const detectedType = ext === '.docx' ? 'DOCX' : ext === '.txt' ? 'TXT' : ext === '.md' ? 'MD' : 'PDF';
+    const documentTitle = (title || name || originalFileName.replace(/\.[a-zA-Z0-9]+$/i, '')).trim();
 
     const normalizedAccess = accessLevel.charAt(0).toUpperCase() + accessLevel.slice(1).toLowerCase();
     if (!['Public', 'Internal', 'Confidential', 'Restricted'].includes(normalizedAccess)) {
@@ -225,13 +227,24 @@ export async function uploadDocument(req, res, next) {
     const orgId = req.user.organizationId?._id || req.user.organizationId;
     const fileSizeMb = (req.file.size / (1024 * 1024)).toFixed(2) + ' MB';
 
+    // Duplicate detection within the same organization: clean up old vectors and record
+    const existingDoc = await Document.findOne({
+      organizationId: orgId,
+      originalFileName: originalFileName
+    });
+    if (existingDoc) {
+      console.log(`[Upload] Duplicate upload detected for "${originalFileName}". Purging previous vectors for doc ID ${existingDoc._id}.`);
+      await deleteDocumentVectors(String(existingDoc._id));
+      await Document.deleteOne({ _id: existingDoc._id });
+    }
+
     // 1. Create document record in "processing" status
     const doc = await Document.create({
       title: documentTitle,
       originalFileName: originalFileName,
       internalStorageKey: req.file.filename,
       storagePath: req.file.path,
-      fileType: 'PDF',
+      fileType: detectedType,
       fileSize: fileSizeMb,
       fileSizeBytes: req.file.size,
       organizationId: orgId,
@@ -240,14 +253,14 @@ export async function uploadDocument(req, res, next) {
       allowedRoles: normalizedAccess === 'Restricted' ? ['admin'] : normalizedAccess === 'Confidential' ? ['admin', 'manager'] : ['admin', 'manager', 'employee'],
       status: 'processing',
       chunksCount: 0,
-      summary: summary || `PDF Document "${documentTitle}" ingested into knowledge base.`,
+      summary: summary || `${detectedType} Document "${documentTitle}" ingested into knowledge base.`,
       excerpt: ''
     });
 
-    // 2. Extract text from PDF
+    // 2. Extract text from file (PDF, DOCX, TXT, MD)
     let extraction;
     try {
-      extraction = await extractTextFromPdf(req.file.path);
+      extraction = await extractTextFromFile(req.file.path, originalFileName);
     } catch (parseErr) {
       doc.status = 'failed';
       doc.processingError = parseErr.message;
@@ -260,12 +273,12 @@ export async function uploadDocument(req, res, next) {
         resourceId: String(doc._id),
         resourceName: doc.title,
         result: 'denied',
-        details: `PDF text extraction failed: ${parseErr.message}`
+        details: `Document text extraction failed: ${parseErr.message}`
       });
 
       return res.status(422).json({
         success: false,
-        message: `PDF Processing Error: ${parseErr.message}`,
+        message: `Processing Error: ${parseErr.message}`,
         documentId: doc._id
       });
     }
@@ -286,30 +299,60 @@ export async function uploadDocument(req, res, next) {
       });
     }
 
-    // 4. Generate Embeddings & Index in Qdrant
-    const vectorChunks = [];
-    for (const chunk of chunks) {
-      const embResult = await generateEmbedding(chunk.text);
-      vectorChunks.push({
-        ...chunk,
-        vector: embResult.embedding,
-        documentId: String(doc._id),
-        organizationId: String(orgId),
-        accessLevel: doc.accessLevel,
-        allowedRoles: doc.allowedRoles
+    // 4. Generate Embeddings & Index in Qdrant with robust error handling
+    try {
+      const vectorChunks = [];
+      for (const chunk of chunks) {
+        const embResult = await generateEmbedding(chunk.text);
+        vectorChunks.push({
+          ...chunk,
+          vector: embResult.embedding,
+          documentId: String(doc._id),
+          docName: doc.title,
+          organizationId: String(orgId),
+          accessLevel: doc.accessLevel,
+          allowedRoles: doc.allowedRoles
+        });
+      }
+
+      const upsertedCount = await upsertChunks(vectorChunks);
+      if (upsertedCount === 0 && vectorChunks.length > 0) {
+        throw new Error('Vector store failed to persist chunks.');
+      }
+
+      console.log(`[Document Ingestion] Successfully processed "${doc.title}" (${extraction.numPages} pages, ${chunks.length} chunks, accessLevel: ${doc.accessLevel})`);
+
+      // 5. Update Document as Indexed
+      doc.status = 'indexed';
+      doc.chunksCount = chunks.length;
+      doc.excerpt = chunks[0]?.text?.substring(0, 300) || '';
+      doc.processingError = null;
+      if (!summary) {
+        doc.summary = `Processed ${extraction.numPages} pages into ${chunks.length} vectorized chunks for organization ${req.user.organizationId?.name || ''}.`;
+      }
+      await doc.save();
+    } catch (indexErr) {
+      console.error(`[Document Ingestion Failed] Error indexing "${doc.title}":`, indexErr.message);
+      doc.status = 'failed';
+      doc.processingError = indexErr.message;
+      await doc.save();
+
+      await createAuditLog({
+        req,
+        action: 'DOCUMENT_UPLOAD_FAILED',
+        resourceType: 'DOCUMENT',
+        resourceId: String(doc._id),
+        resourceName: doc.title,
+        result: 'denied',
+        details: `Embedding or vector persistence failed: ${indexErr.message}`
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: `Indexing failed: ${indexErr.message}`,
+        documentId: doc._id
       });
     }
-
-    await upsertChunks(vectorChunks);
-
-    // 5. Update Document as Indexed
-    doc.status = 'indexed';
-    doc.chunksCount = chunks.length;
-    doc.excerpt = chunks[0]?.text?.substring(0, 300) || '';
-    if (!summary) {
-      doc.summary = `Processed ${extraction.numPages} pages into ${chunks.length} vectorized chunks for organization ${req.user.organizationId?.name || ''}.`;
-    }
-    await doc.save();
 
     await createAuditLog({
       req,
@@ -378,7 +421,7 @@ export async function reindexDocument(req, res, next) {
 
     // Check if original file is available
     if (doc.storagePath && fs.existsSync(doc.storagePath)) {
-      const extraction = await extractTextFromPdf(doc.storagePath);
+      const extraction = await extractTextFromFile(doc.storagePath, doc.originalFileName);
       const chunks = chunkDocument(extraction.pages, {
         documentId: String(doc._id),
         organizationId: String(userOrgId)
@@ -495,31 +538,41 @@ export async function createDocument(req, res, next) {
       ownerId: req.user._id,
       accessLevel: normalizedAccess,
       allowedRoles: normalizedAccess === 'Restricted' ? ['admin'] : normalizedAccess === 'Confidential' ? ['admin', 'manager'] : ['admin', 'manager', 'employee'],
-      status: 'indexed',
-      chunksCount: Math.floor(Math.random() * 40) + 16,
+      status: 'processing',
+      chunksCount: 0,
       summary: summary || 'Enterprise operational knowledge document indexed into tenant repository.',
       excerpt: excerpt || `Sample parsed content from ${documentTitle}. Prepared for semantic vector indexing in Phase 3.`
     });
 
-    // Also index sample chunks into vector store so metadata-only documents are retrievable
-    const sampleText = `${documentTitle}. ${doc.summary}. ${doc.excerpt}`;
-    const chunks = chunkDocument(sampleText, {
-      documentId: String(doc._id),
-      organizationId: String(doc.organizationId)
-    });
-    const vectorChunks = [];
-    for (const chunk of chunks) {
-      const emb = await generateEmbedding(chunk.text);
-      vectorChunks.push({
-        ...chunk,
-        vector: emb.embedding,
+    // Index sample chunks into vector store so metadata-only documents are retrievable
+    try {
+      const sampleText = `${documentTitle}. ${doc.summary}. ${doc.excerpt}`;
+      const chunks = chunkDocument(sampleText, {
         documentId: String(doc._id),
-        organizationId: String(doc.organizationId),
-        accessLevel: doc.accessLevel,
-        allowedRoles: doc.allowedRoles
+        organizationId: String(doc.organizationId)
       });
+      const vectorChunks = [];
+      for (const chunk of chunks) {
+        const emb = await generateEmbedding(chunk.text);
+        vectorChunks.push({
+          ...chunk,
+          vector: emb.embedding,
+          documentId: String(doc._id),
+          organizationId: String(doc.organizationId),
+          accessLevel: doc.accessLevel,
+          allowedRoles: doc.allowedRoles
+        });
+      }
+      await upsertChunks(vectorChunks);
+
+      doc.status = 'indexed';
+      doc.chunksCount = chunks.length;
+      await doc.save();
+    } catch (indexErr) {
+      doc.status = 'failed';
+      doc.processingError = indexErr.message;
+      await doc.save();
     }
-    await upsertChunks(vectorChunks);
 
     await createAuditLog({
       req,
